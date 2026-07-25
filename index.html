@@ -6841,6 +6841,50 @@ function removeImage() {
 let isStreaming = false;
 let _streamAbort = null;   // AbortController for active stream
 let _streamLastData = 0;   // timestamp of last received chunk
+let _streamWatchdog = null;
+let _streamHasReceivedData = false;
+let _streamTimeoutReason = '';
+
+const SEND_ICON_HTML = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>';
+const STOP_ICON_HTML = '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
+
+function setStreamingUI(active) {
+  const btn = document.getElementById('sendBtn');
+  if (!btn) return;
+  btn.disabled = false;
+  btn.innerHTML = active ? STOP_ICON_HTML : SEND_ICON_HTML;
+  btn.title = active ? '停止生成' : '发送';
+  btn.setAttribute('aria-label', active ? '停止生成' : '发送');
+}
+
+function clearStreamWatchdog() {
+  if (_streamWatchdog) {
+    clearInterval(_streamWatchdog);
+    _streamWatchdog = null;
+  }
+}
+
+function startStreamWatchdog() {
+  clearStreamWatchdog();
+  _streamWatchdog = setInterval(() => {
+    if (!isStreaming || !_streamAbort) return;
+    const idleMs = Date.now() - _streamLastData;
+    const limitMs = _streamHasReceivedData ? 60000 : 45000;
+    if (idleMs >= limitMs) {
+      _streamTimeoutReason = _streamHasReceivedData
+        ? '回复中断：连续 60 秒没有收到新内容'
+        : '请求超时：45 秒内没有收到模型回复';
+      _streamAbort.abort();
+      clearStreamWatchdog();
+    }
+  }, 1000);
+}
+
+function stopStreaming() {
+  if (!isStreaming || !_streamAbort) return;
+  _streamTimeoutReason = '已停止生成';
+  _streamAbort.abort();
+}
 
 async function regenerateResponse(index) {
   if (isStreaming) return;
@@ -6891,9 +6935,13 @@ async function regenerateResponse(index) {
 }
 
 async function sendMessage() {
+  if (isStreaming) {
+    stopStreaming();
+    return;
+  }
   const input = document.getElementById('userInput');
   const text = input.value.trim();
-  if ((!text && !pendingImage) || isStreaming) return;
+  if (!text && !pendingImage) return;
 
   const asst = getActiveAssistant();
   const asstProvider = asst.provider || getDefaultProviderId();
@@ -6941,7 +6989,10 @@ async function sendMessage() {
   isStreaming = true;
   _streamAbort = new AbortController();
   _streamLastData = Date.now();
-  document.getElementById('sendBtn').disabled = true;
+  _streamHasReceivedData = false;
+  _streamTimeoutReason = '';
+  setStreamingUI(true);
+  startStreamWatchdog();
 
   const assistantMsg = { role: 'assistant', content: '', thinking: '', usage: null, model: getModel(), ts: now.getTime(), _loading: true };
   conv.messages.push(assistantMsg);
@@ -6986,7 +7037,8 @@ async function sendMessage() {
     }
     isStreaming = false;
     _streamAbort = null;
-    document.getElementById('sendBtn').disabled = false;
+    clearStreamWatchdog();
+    setStreamingUI(false);
     return;
   }
 
@@ -7154,6 +7206,7 @@ async function sendMessage() {
       const { done, value } = await reader.read();
       if (done) break;
       _streamLastData = Date.now();
+      _streamHasReceivedData = true;
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split('\n');
       buffer = lines.pop() || '';
@@ -7245,10 +7298,13 @@ async function sendMessage() {
 
   } catch(err) {
     if (typingEl) typingEl.remove();
-    // AbortError means the stream was intentionally killed (e.g. by background recovery)
-    assistantMsg.content += err.name === 'AbortError'
-      ? (assistantMsg.content ? '\n\n[连接中断 - 切后台时流被终止]' : '[连接中断 - 切后台时流被终止]')
-      : `[错误] ${err.message}`;
+    // AbortError 可能来自手动停止、请求超时或页面生命周期保护。
+    if (err.name === 'AbortError') {
+      const note = _streamTimeoutReason || '连接中断';
+      assistantMsg.content += assistantMsg.content ? `\n\n[${note}]` : `[${note}]`;
+    } else {
+      assistantMsg.content += assistantMsg.content ? `\n\n[错误] ${err.message}` : `[错误] ${err.message}`;
+    }
     // Fix: save any partial usage data from before the error
     if (usage && (usage.prompt_tokens || usage.completion_tokens)) {
       const cached = usage.prompt_tokens_details?.cached_tokens || 0;
@@ -7274,7 +7330,8 @@ async function sendMessage() {
 
   isStreaming = false;
   _streamAbort = null;
-  document.getElementById('sendBtn').disabled = false;
+  clearStreamWatchdog();
+  setStreamingUI(false);
 }
 
 function renderStreamingMessage(index, content) {
@@ -9018,10 +9075,17 @@ document.addEventListener('DOMContentLoaded', async () => {
       // 3) 如果有未完成的自动云端备份进度，回到前台后再尝试一次
       retryPendingAutoBackupIfNeeded();
 
-      // 4) 流式请求看门狗：如果超过 30 秒没收到数据，说明连接已死
-      if (isStreaming && _streamAbort && (Date.now() - _streamLastData > 30000)) {
-        console.log('[lifecycle] stream stale, aborting');
-        _streamAbort.abort();
+      // 4) 页面回到前台时立即补做一次流式状态检查；常驻看门狗也会持续检查。
+      if (isStreaming && _streamAbort) {
+        const idleMs = Date.now() - _streamLastData;
+        const limitMs = _streamHasReceivedData ? 60000 : 45000;
+        if (idleMs >= limitMs) {
+          _streamTimeoutReason = _streamHasReceivedData
+            ? '回复中断：连续 60 秒没有收到新内容'
+            : '请求超时：45 秒内没有收到模型回复';
+          console.log('[lifecycle] stream stale, aborting');
+          _streamAbort.abort();
+        }
       }
 
       console.log('[lifecycle] visible: repaint + timers restored');
