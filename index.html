@@ -1564,6 +1564,35 @@ button.msg-status-dot:focus-visible {
 .msg-footer:empty { display: none; }
 .msg.user .msg-footer { display: none; }
 
+
+/* Favorites / Kindle-style excerpts */
+.favorites-modal { max-width: 760px; }
+.favorites-list { display:flex; flex-direction:column; gap:16px; padding:4px 2px 8px; }
+.favorite-empty { text-align:center; padding:54px 20px; color:var(--text3); font-size:13px; line-height:1.8; }
+.favorite-card {
+  position:relative; padding:22px 22px 16px; border:1px solid var(--border);
+  border-radius:16px; background:var(--surface); box-shadow:var(--shadow-sm);
+}
+.favorite-card::before {
+  content:'“'; position:absolute; left:13px; top:4px; font-family:Georgia,serif;
+  font-size:42px; line-height:1; color:var(--border); pointer-events:none;
+}
+.favorite-content { padding-left:13px; font-family:var(--font); font-size:15px; line-height:1.85; color:var(--text); word-break:break-word; }
+.favorite-content > :first-child { margin-top:0; }
+.favorite-content > :last-child { margin-bottom:0; }
+.favorite-meta { display:flex; flex-wrap:wrap; gap:5px 10px; margin:16px 0 0 13px; color:var(--text3); font-size:11px; line-height:1.6; }
+.favorite-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:12px; }
+.favorite-action { border:0; background:transparent; color:var(--text3); font-family:var(--font); font-size:12px; padding:6px 8px; cursor:pointer; border-radius:8px; }
+.favorite-action:hover { background:var(--surface2); color:var(--text); }
+.favorite-action.primary { color:var(--accent); }
+.favorite-action.danger { color:var(--danger,#e53935); }
+.favorite-action:disabled { opacity:.45; cursor:default; background:transparent; }
+@media (max-width:600px) {
+  .favorite-card { padding:20px 16px 14px; border-radius:14px; }
+  .favorite-content { padding-left:10px; font-size:14px; line-height:1.78; }
+  .favorite-meta { margin-left:10px; }
+}
+
 /* Old msg-menu (desktop click from "..." inline button) */
 .msg-menu {
   display: none;
@@ -2781,6 +2810,9 @@ html, body, .header, .messages, .input-area, .msg-content, .modal, .cache-indica
       <button class="icon-btn" id="memoryBtn" onclick="showMemoryBank()" title="记忆库">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
       </button>
+      <button class="icon-btn" id="favoritesBtn" onclick="showFavorites()" title="收藏">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h12a1 1 0 0 1 1 1v17l-7-4-7 4V4a1 1 0 0 1 1-1z"/></svg>
+      </button>
       <button class="icon-btn" id="nightToggleBtn" onclick="cycleTheme()" title="切换到夜间护眼">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
       </button>
@@ -3360,6 +3392,14 @@ deepseek-chat"></textarea>
   </div>
 </div>
 
+<!-- FAVORITES MODAL -->
+<div class="modal-overlay" id="favoritesModal">
+  <div class="modal favorites-modal">
+    <h2>收藏 <button onclick="closeModal('favoritesModal')">&#10005;</button></h2>
+    <div class="favorites-list" id="favoritesList"></div>
+  </div>
+</div>
+
 <!-- Message menu overlay + popup -->
 <div class="msg-menu-overlay" id="msgMenuOverlay" onclick="closeMsgMenus()"></div>
 <div class="msg-menu" id="msgMenuPopup" onclick="event.stopPropagation()"></div>
@@ -3481,6 +3521,7 @@ function defaultState() {
     conversations: {},   // { id: { id, title, created, msgCount, assistantId } } — NO messages
     activeConvId: null,
     memories: [],
+    favorites: [],
     webdav: { url: '', user: '', pass: '', path: '/SecretHome/', proxy: '' },
     companionControl: { url: '', secret: '', useChatBackend: false, pushEnabled: false },
     autoExport: false,
@@ -4311,6 +4352,7 @@ async function exportLocalBackup(silent) {
       reasoningEffort: state.reasoningEffort,
       conversations: filteredConvs,
       memories: state.memories,
+      favorites: state.favorites || [],
       autoExport: state.autoExport,
       autoExportInterval: state.autoExportInterval,
       msgsSinceExport: state.msgsSinceExport,
@@ -4370,6 +4412,7 @@ function importLocalBackup(event) {
       state.reasoningEnabled = data.reasoningEnabled ?? false;
       state.reasoningEffort = data.reasoningEffort || 'auto';
       state.memories = data.memories || [];
+      state.favorites = Array.isArray(data.favorites) ? data.favorites : [];
       state.lastLocalBackupTime = data.lastLocalBackupTime || state.lastLocalBackupTime || null;
       state.lastCloudBackupTime = data.lastCloudBackupTime || state.lastCloudBackupTime || null;
       state.lastCloudBackupError = data.lastCloudBackupError || '';
@@ -6381,6 +6424,129 @@ function cancelEdit(index) {
   renderMessages();
 }
 
+
+// ============ FAVORITES ============
+function ensureFavorites() {
+  if (!Array.isArray(state.favorites)) state.favorites = [];
+  return state.favorites;
+}
+
+function favoriteKey(convId, msgIndex) {
+  return `${convId}::${msgIndex}`;
+}
+
+function isMessageFavorited(msgIndex) {
+  const conv = getActiveConv();
+  return ensureFavorites().some(f => f.convId === conv.id && Number(f.msgIndex) === Number(msgIndex));
+}
+
+function toggleFavorite(msgIndex) {
+  const conv = getActiveConv();
+  const msg = conv.messages[msgIndex];
+  if (!msg || msg.role !== 'assistant') return;
+  const favorites = ensureFavorites();
+  const existing = favorites.findIndex(f => f.convId === conv.id && Number(f.msgIndex) === Number(msgIndex));
+  if (existing >= 0) {
+    favorites.splice(existing, 1);
+    saveState();
+    showToast('已取消收藏');
+    return;
+  }
+  const asst = state.assistants[conv.assistantId || state.activeAssistantId] || getActiveAssistant();
+  favorites.unshift({
+    id: 'fav_' + Date.now() + '_' + Math.random().toString(36).slice(2,7),
+    savedAt: Date.now(),
+    convId: conv.id,
+    msgIndex,
+    assistantId: conv.assistantId || state.activeAssistantId || '',
+    assistantName: asst?.name || 'AI 助手',
+    conversationTitle: conv.title || state.conversations[conv.id]?.title || '未命名对话',
+    model: msg.model || getModel(),
+    content: msg.content || '',
+    messageTs: msg.ts || null
+  });
+  saveState();
+  showToast('已收藏回复');
+}
+
+function formatFavoriteTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  return d.toLocaleString('zh-CN', { year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', hour12:false });
+}
+
+function showFavorites() {
+  renderFavorites();
+  openModal('favoritesModal');
+}
+
+function renderFavorites() {
+  const list = document.getElementById('favoritesList');
+  if (!list) return;
+  const favorites = ensureFavorites().slice().sort((a,b) => (b.savedAt || 0) - (a.savedAt || 0));
+  if (!favorites.length) {
+    list.innerHTML = '<div class="favorite-empty">还没有收藏的回复。<br>在助手消息的操作菜单里点“收藏回复”，摘录就会出现在这里。</div>';
+    return;
+  }
+  list.innerHTML = favorites.map(f => {
+    const convExists = !!state.conversations[f.convId];
+    const source = convExists ? `来自对话《${esc(f.conversationTitle || '未命名对话')}》` : `原对话已删除 · 《${esc(f.conversationTitle || '未命名对话')}》`;
+    return `<article class="favorite-card">
+      <div class="favorite-content">${renderMd(f.content || '')}</div>
+      <div class="favorite-meta">
+        <span>来自模型：${esc(f.model || '未知模型')}</span>
+        <span>${source}</span>
+        <span>收藏于 ${esc(formatFavoriteTime(f.savedAt))}</span>
+      </div>
+      <div class="favorite-actions">
+        <button class="favorite-action primary" ${convExists ? '' : 'disabled'} onclick="jumpToFavorite('${f.id}')">查看原对话</button>
+        <button class="favorite-action danger" onclick="removeFavorite('${f.id}')">取消收藏</button>
+      </div>
+    </article>`;
+  }).join('');
+}
+
+function removeFavorite(id) {
+  const favorites = ensureFavorites();
+  const i = favorites.findIndex(f => f.id === id);
+  if (i < 0) return;
+  favorites.splice(i, 1);
+  saveState();
+  renderFavorites();
+  showToast('已取消收藏');
+}
+
+async function jumpToFavorite(id) {
+  const f = ensureFavorites().find(x => x.id === id);
+  if (!f) return;
+  if (!state.conversations[f.convId]) {
+    showToast('原对话已删除');
+    renderFavorites();
+    return;
+  }
+  closeModal('favoritesModal');
+  _highlightMsgIndex = Number(f.msgIndex);
+  await switchConversation(f.convId);
+  let targetIndex = Number(f.msgIndex);
+  const conv = getActiveConv();
+  const exact = conv.messages[targetIndex];
+  if (!exact || exact.role !== 'assistant' || exact.content !== f.content) {
+    const found = conv.messages.findIndex(m => m && m.role === 'assistant' && m.content === f.content);
+    if (found >= 0) targetIndex = found;
+  }
+  requestAnimationFrame(() => {
+    const msgEl = document.querySelector(`.msg[data-index="${targetIndex}"]`);
+    if (msgEl) {
+      msgEl.scrollIntoView({ behavior:'smooth', block:'center' });
+      msgEl.classList.add('highlight');
+      setTimeout(() => msgEl.classList.remove('highlight'), 2500);
+    } else {
+      showToast('已打开原对话，但原消息可能已被修改或删除');
+    }
+    _highlightMsgIndex = -1;
+  });
+}
+
 // ============ MESSAGE MENU & BRANCHING ============
 function toggleMsgMenu(index, event) {
   event.stopPropagation();
@@ -6398,6 +6564,9 @@ function toggleMsgMenu(index, event) {
     </button>
     ${isAssistant ? `<button class="conv-context-menu-item" onclick="regenerateResponse(${index}); closeMsgMenus();">
       <span class="ctx-icon">&#8635;</span>重新生成
+    </button>
+    <button class="conv-context-menu-item" onclick="toggleFavorite(${index}); closeMsgMenus();">
+      <span class="ctx-icon">&#9734;</span>${isMessageFavorited(index) ? '取消收藏' : '收藏回复'}
     </button>` : ''}
     <div class="conv-context-sep"></div>
     <button class="conv-context-menu-item" onclick="startBulkDeleteMode(${index});">
@@ -7970,7 +8139,8 @@ async function buildBackupData() {
       reasoningEnabled: state.reasoningEnabled,
       reasoningEffort: state.reasoningEffort,
       conversations: filteredConvs,
-      memories: state.memories
+      memories: state.memories,
+      favorites: state.favorites || []
     }
   };
 }
@@ -8160,6 +8330,7 @@ async function doRestore() {
       state.reasoningEnabled = data.reasoningEnabled ?? false;
       state.reasoningEffort = data.reasoningEffort || 'auto';
       state.memories = data.memories || [];
+      state.favorites = Array.isArray(data.favorites) ? data.favorites : [];
       state.webdav = keepWebdav;
 
       // Import assistants (v2) or migrate from v1
@@ -8240,6 +8411,14 @@ async function doRestore() {
       for (const mem of backupMems) {
         if (!state.memories.includes(mem)) {
           state.memories.push(mem);
+        }
+      }
+      const backupFavorites = Array.isArray(data.favorites) ? data.favorites : [];
+      const existingFavoriteIds = new Set(ensureFavorites().map(f => f.id));
+      for (const favorite of backupFavorites) {
+        if (favorite && !existingFavoriteIds.has(favorite.id)) {
+          state.favorites.push(favorite);
+          existingFavoriteIds.add(favorite.id);
         }
       }
     }
