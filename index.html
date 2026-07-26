@@ -3241,7 +3241,7 @@ deepseek-chat"></textarea>
       <div class="field">
         <label>Temperature</label>
         <input type="number" id="asstEditTemperature" value="0.7" min="0" max="2" step="0.1" inputmode="decimal">
-        <div class="hint">数值越低越稳定，越高越发散。启用思考链时此项会被忽略。</div>
+        <div class="hint">数值越低越稳定，越高越发散。明确开启推理时，此项会被忽略。</div>
       </div>
 
       <div class="asst-advanced-title">高级参数</div>
@@ -3266,13 +3266,15 @@ deepseek-chat"></textarea>
           <div class="hint">发送最近 N 条消息作为上下文，0 = 不限制（发送全部）。System Prompt 始终发送。</div>
         </div>
         <div class="field">
-          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
-            <input type="checkbox" id="asstEditReasoningEnabled" style="accent-color:var(--accent);width:16px;height:16px;" onchange="updateAsstAdvancedHints()">
-            启用思考链
-          </label>
-          <div class="hint" id="asstReasoningHint">只有支持 reasoning / thinking 的模型才会真正生效。</div>
+          <label>推理模式</label>
+          <select id="asstEditReasoningMode" onchange="updateAsstAdvancedHints()">
+            <option value="auto">自动（使用模型默认行为）</option>
+            <option value="enabled">开启（明确要求模型思考）</option>
+            <option value="disabled">关闭（明确要求模型不思考）</option>
+          </select>
+          <div class="hint" id="asstReasoningHint">自动模式不发送推理开关；模型会按自己的默认方式决定。</div>
         </div>
-        <div class="field">
+        <div class="field" id="asstReasoningEffortField">
           <label>思考力度</label>
           <select id="asstEditReasoningEffort">
             <option value="auto">Auto — 自动</option>
@@ -3508,6 +3510,7 @@ function defaultState() {
         cacheStrategy: 'anthropic_1h',
         maxTokens: 4096,
         contextLen: 0,
+        reasoningMode: 'auto',
         reasoningEnabled: false,
         reasoningEffort: 'auto',
         forceZDR: false,
@@ -3532,6 +3535,7 @@ function defaultState() {
     lastCloudBackupTime: null,
     lastCloudBackupError: '',
     lastAutoExportCheckTime: null,
+    reasoningMode: 'auto',
     reasoningEnabled: false,
     reasoningEffort: 'auto',
     uiMode: 'roleplay',
@@ -3571,12 +3575,22 @@ function normalizeReasoningEffort(value, fallback = 'auto') {
   return ['auto', 'low', 'medium', 'high', 'max'].includes(v) ? v : fallback;
 }
 
+function normalizeReasoningMode(value, legacyEnabled) {
+  const v = String(value || '').trim();
+  if (['auto', 'enabled', 'disabled'].includes(v)) return v;
+  // 旧版只有“启用思考链”开关：开启迁移为“开启”，关闭迁移为“自动”。
+  return legacyEnabled === true ? 'enabled' : 'auto';
+}
+
 function normalizeAssistantRuntimeSettings(asst, data = state) {
   if (!asst) return asst;
   asst.cacheStrategy = normalizeCacheStrategy(asst.cacheStrategy, cacheStrategyFromLegacyTTL(data?.cacheTTL));
   asst.maxTokens = clampNumber(asst.maxTokens ?? data?.maxTokens, 4096, 256, 128000);
   asst.contextLen = clampNumber(asst.contextLen ?? data?.contextLen, 0, 0, 9999);
-  asst.reasoningEnabled = (asst.reasoningEnabled !== undefined) ? !!asst.reasoningEnabled : !!data?.reasoningEnabled;
+  asst.reasoningMode = normalizeReasoningMode(asst.reasoningMode,
+    asst.reasoningEnabled !== undefined ? !!asst.reasoningEnabled : !!data?.reasoningEnabled);
+  // 保留旧字段，确保旧备份和旧代码路径不会出错。
+  asst.reasoningEnabled = asst.reasoningMode === 'enabled';
   asst.reasoningEffort = normalizeReasoningEffort(asst.reasoningEffort, data?.reasoningEffort || 'auto');
   asst.forceZDR = !!asst.forceZDR;
   asst.denyDataCollection = !!asst.denyDataCollection;
@@ -3595,8 +3609,13 @@ function getAssistantContextLen(asst = getActiveAssistant()) {
   return clampNumber(asst?.contextLen ?? state.contextLen, 0, 0, 9999);
 }
 
+function getAssistantReasoningMode(asst = getActiveAssistant()) {
+  return normalizeReasoningMode(asst?.reasoningMode,
+    asst?.reasoningEnabled !== undefined ? !!asst.reasoningEnabled : !!state.reasoningEnabled);
+}
+
 function isAssistantReasoningEnabled(asst = getActiveAssistant()) {
-  return (asst?.reasoningEnabled !== undefined) ? !!asst.reasoningEnabled : !!state.reasoningEnabled;
+  return getAssistantReasoningMode(asst) === 'enabled';
 }
 
 function getAssistantReasoningEffort(asst = getActiveAssistant()) {
@@ -4521,7 +4540,7 @@ function getActiveAssistant() {
   const first = getOrderedAssistants()[0];
   if (first) { state.activeAssistantId = first.id; return first; }
   // Create default if none exist
-  const def = { id: 'asst_default', name: 'AI 助手', systemPrompt: '', model: 'anthropic/claude-opus-4.6', customModel: '', temperature: 0.7, cacheStrategy: 'anthropic_1h', maxTokens: 4096, contextLen: 0, reasoningEnabled: false, reasoningEffort: 'auto', forceZDR: false, denyDataCollection: false, color: '#C9795E', provider: 'openrouter' };
+  const def = { id: 'asst_default', name: 'AI 助手', systemPrompt: '', model: 'anthropic/claude-opus-4.6', customModel: '', temperature: 0.7, cacheStrategy: 'anthropic_1h', maxTokens: 4096, contextLen: 0, reasoningMode: 'auto', reasoningEnabled: false, reasoningEffort: 'auto', forceZDR: false, denyDataCollection: false, color: '#C9795E', provider: 'openrouter' };
   state.assistants['asst_default'] = def;
   state.assistantOrder = ['asst_default'];
   state.activeAssistantId = 'asst_default';
@@ -5061,6 +5080,8 @@ function updateAsstAdvancedHints() {
   const cacheStrategy = document.getElementById('asstEditCacheStrategy')?.value || 'auto';
   const cacheHint = document.getElementById('asstCacheHint');
   const reasoningHint = document.getElementById('asstReasoningHint');
+  const reasoningMode = document.getElementById('asstEditReasoningMode')?.value || 'auto';
+  const reasoningEffortField = document.getElementById('asstReasoningEffortField');
   const zdrHint = document.getElementById('asstZDRHint');
   const dataCollectionHint = document.getElementById('asstDataCollectionHint');
   const forceZDR = document.getElementById('asstEditForceZDR')?.checked || false;
@@ -5080,13 +5101,20 @@ function updateAsstAdvancedHints() {
       cacheHint.textContent = '当前不是 Claude 模型，不会强行发送 1 小时缓存；是否命中看供应商自己的缓存规则。';
     }
   }
+  if (reasoningEffortField) {
+    reasoningEffortField.style.display = reasoningMode === 'enabled' ? '' : 'none';
+  }
   if (reasoningHint) {
     if (providerKind !== 'openrouter') {
-      reasoningHint.textContent = '当前供应商是 OpenAI 兼容接口，前端不会发送 OpenRouter 专用思考参数。';
-    } else if (family === 'anthropic') {
-      reasoningHint.textContent = '当前是 Claude 模型，开启后会发送 OpenRouter reasoning 参数；启用时 temperature 会自动忽略。';
+      reasoningHint.textContent = '当前供应商是 OpenAI 兼容接口，这里的推理模式不会随请求发送。';
+    } else if (reasoningMode === 'auto') {
+      reasoningHint.textContent = family === 'anthropic'
+        ? '自动：不发送推理开关。像 Claude Fable 5 这类模型可能仍会按默认规则自行思考。'
+        : '自动：不发送推理开关，由模型和供应商决定是否思考。';
+    } else if (reasoningMode === 'enabled') {
+      reasoningHint.textContent = '开启：明确发送 reasoning 开启参数；此时 temperature 会自动忽略。';
     } else {
-      reasoningHint.textContent = '当前模型不一定支持 reasoning；开启后只在模型和供应商支持时生效。';
+      reasoningHint.textContent = '关闭：明确发送 reasoning.enabled = false。若模型或端点不支持，供应商可能忽略。';
     }
   }
   if (zdrHint) {
@@ -5116,7 +5144,7 @@ function showAsstEdit(asstId) {
 
   const defaultProvider = getDefaultProviderId();
   const defaultModel = getProviderModelList(defaultProvider)[0]?.value || '';
-  const asst = isNew ? { name: '', systemPrompt: '', chatSystemPrompt: '', model: defaultModel, customModel: '', temperature: normalizeTemperatureValue(state.temperature, 0.7), cacheStrategy: 'auto', maxTokens: 4096, contextLen: 0, reasoningEnabled: false, reasoningEffort: 'auto', forceZDR: false, denyDataCollection: false, color: ASST_COLORS[Object.keys(state.assistants).length % ASST_COLORS.length], provider: defaultProvider } : normalizeAssistantRuntimeSettings(state.assistants[asstId], state);
+  const asst = isNew ? { name: '', systemPrompt: '', chatSystemPrompt: '', model: defaultModel, customModel: '', temperature: normalizeTemperatureValue(state.temperature, 0.7), cacheStrategy: 'auto', maxTokens: 4096, contextLen: 0, reasoningMode: 'auto', reasoningEnabled: false, reasoningEffort: 'auto', forceZDR: false, denyDataCollection: false, color: ASST_COLORS[Object.keys(state.assistants).length % ASST_COLORS.length], provider: defaultProvider } : normalizeAssistantRuntimeSettings(state.assistants[asstId], state);
   const providerId = (asst.provider && getProviderConfig(asst.provider)) ? asst.provider : defaultProvider;
 
   document.getElementById('asstEditName').value = asst.name || '';
@@ -5128,7 +5156,7 @@ function showAsstEdit(asstId) {
   document.getElementById('asstEditCacheStrategy').value = getAssistantCacheStrategy(asst);
   document.getElementById('asstEditMaxTokens').value = getAssistantMaxTokens(asst);
   document.getElementById('asstEditContextLen').value = getAssistantContextLen(asst);
-  document.getElementById('asstEditReasoningEnabled').checked = isAssistantReasoningEnabled(asst);
+  document.getElementById('asstEditReasoningMode').value = getAssistantReasoningMode(asst);
   document.getElementById('asstEditReasoningEffort').value = getAssistantReasoningEffort(asst);
   document.getElementById('asstEditForceZDR').checked = isAssistantZDREnabled(asst);
   document.getElementById('asstEditDenyDataCollection').checked = isAssistantDataCollectionDenied(asst);
@@ -5269,7 +5297,7 @@ async function saveAsstEdit() {
   const cacheStrategy = normalizeCacheStrategy(document.getElementById('asstEditCacheStrategy').value, 'auto');
   const maxTokens = clampNumber(document.getElementById('asstEditMaxTokens').value, 4096, 256, 128000);
   const contextLen = clampNumber(document.getElementById('asstEditContextLen').value, 0, 0, 9999);
-  const reasoningEnabled = document.getElementById('asstEditReasoningEnabled').checked;
+  const reasoningMode = normalizeReasoningMode(document.getElementById('asstEditReasoningMode').value);
   const reasoningEffort = normalizeReasoningEffort(document.getElementById('asstEditReasoningEffort').value, 'auto');
   const forceZDR = document.getElementById('asstEditForceZDR').checked;
   const denyDataCollection = document.getElementById('asstEditDenyDataCollection').checked;
@@ -5286,7 +5314,8 @@ async function saveAsstEdit() {
     asst.cacheStrategy = cacheStrategy;
     asst.maxTokens = maxTokens;
     asst.contextLen = contextLen;
-    asst.reasoningEnabled = reasoningEnabled;
+    asst.reasoningMode = reasoningMode;
+    asst.reasoningEnabled = reasoningMode === 'enabled';
     asst.reasoningEffort = reasoningEffort;
     asst.forceZDR = forceZDR;
     asst.denyDataCollection = denyDataCollection;
@@ -5298,7 +5327,7 @@ async function saveAsstEdit() {
   } else {
     // Create new
     const id = 'asst_' + Date.now();
-    state.assistants[id] = { id, name, model, customModel, provider, temperature, cacheStrategy, maxTokens, contextLen, reasoningEnabled, reasoningEffort, forceZDR, denyDataCollection, systemPrompt, chatSystemPrompt, color };
+    state.assistants[id] = { id, name, model, customModel, provider, temperature, cacheStrategy, maxTokens, contextLen, reasoningMode, reasoningEnabled: reasoningMode === 'enabled', reasoningEffort, forceZDR, denyDataCollection, systemPrompt, chatSystemPrompt, color };
     normalizeAssistantOrderForData(state);
     if (!state.assistantOrder.includes(id)) state.assistantOrder.push(id);
     if (editingAsstAvatar) state.assistants[id].avatar = editingAsstAvatar;
@@ -7118,7 +7147,8 @@ async function sendMessage() {
   const asstCacheStrategy = getAssistantCacheStrategy(asst);
   const asstMaxTokens = getAssistantMaxTokens(asst);
   const asstContextLen = getAssistantContextLen(asst);
-  const asstReasoningEnabled = isAssistantReasoningEnabled(asst);
+  const asstReasoningMode = getAssistantReasoningMode(asst);
+  const asstReasoningEnabled = asstReasoningMode === 'enabled';
   const asstReasoningEffort = getAssistantReasoningEffort(asst);
   const asstForceZDR = isAssistantZDREnabled(asst);
   const asstDenyDataCollection = isAssistantDataCollectionDenied(asst);
@@ -7328,12 +7358,15 @@ async function sendMessage() {
         if (asstDenyDataCollection) body.provider.data_collection = 'deny';
       }
 
-      if (asstReasoningEnabled) {
+      if (asstReasoningMode === 'enabled') {
         body.reasoning = (asstReasoningEffort && asstReasoningEffort !== 'auto')
-          ? { effort: asstReasoningEffort }
+          ? { enabled: true, effort: asstReasoningEffort }
           : { enabled: true };
-        // Anthropic requires temperature=1 when thinking is enabled
+        // 明确开启推理时，避免 temperature 与思考模式冲突。
         delete body.temperature;
+      } else if (asstReasoningMode === 'disabled') {
+        // 与“自动”不同：这里会明确告诉 OpenRouter 不要启用推理。
+        body.reasoning = { enabled: false };
       }
 
       apiUrl = getProviderEndpoint(activeProviderCfg);
